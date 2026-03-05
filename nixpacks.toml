@@ -1,0 +1,1131 @@
+import { useState, useEffect, useCallback, useMemo } from 'react';
+import { Calendar, dateFnsLocalizer, View } from 'react-big-calendar';
+import { format, parse, startOfWeek, getDay } from 'date-fns';
+import { enUS } from 'date-fns/locale';
+import { io, Socket } from 'socket.io-client';
+import { 
+  Calendar as CalendarIcon, 
+  CheckSquare, 
+  Settings, 
+  Bell, 
+  LogOut, 
+  Check, 
+  Copy,
+  Clock,
+  User,
+  AlertCircle,
+  Send
+} from 'lucide-react';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
+import { Badge } from '@/components/ui/badge';
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from '@/components/ui/dialog';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { Switch } from '@/components/ui/switch';
+import { Textarea } from '@/components/ui/textarea';
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
+import { ScrollArea } from '@/components/ui/scroll-area';
+import { toast } from 'sonner';
+import type { User, CalendarEvent, Task, Notification, EventType, TaskPriority } from '@/types';
+
+import 'react-big-calendar/lib/css/react-big-calendar.css';
+
+// API base URL
+const API = import.meta.env.VITE_API_URL || '';
+
+// Calendar localizer
+const locales = { 'en-US': enUS };
+const localizer = dateFnsLocalizer({
+  format,
+  parse,
+  startOfWeek,
+  getDay,
+  locales,
+});
+
+// Event type colors
+const eventColors: Record<EventType, string> = {
+  busy: '#ef4444',
+  meeting: '#f97316',
+  focus: '#8b5cf6',
+  break: '#22c55e',
+};
+
+const eventTypeLabels: Record<EventType, string> = {
+  busy: 'Busy',
+  meeting: 'Meeting',
+  focus: 'Focus',
+  break: 'Break',
+};
+
+// Status config
+const statusConfig: Record<string, { color: string; label: string }> = {
+  available: { color: '#22c55e', label: 'Available' },
+  busy: { color: '#ef4444', label: 'Busy' },
+  meeting: { color: '#f97316', label: 'In Meeting' },
+  focus: { color: '#8b5cf6', label: 'Focus Time' },
+  break: { color: '#22c55e', label: 'On Break' },
+};
+
+// Priority config
+const priorityConfig: Record<TaskPriority, { color: string; label: string }> = {
+  low: { color: '#22c55e', label: 'Low' },
+  medium: { color: '#f97316', label: 'Medium' },
+  high: { color: '#ef4444', label: 'High' },
+};
+
+// ==================== AUTH SCREEN ====================
+function AuthScreen({ onAuth }: { onAuth: (token: string, user: User) => void }) {
+  const [isLogin, setIsLogin] = useState(true);
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
+  const [displayName, setDisplayName] = useState('');
+  const [loading, setLoading] = useState(false);
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setLoading(true);
+
+    try {
+      const endpoint = isLogin ? '/api/login' : '/api/register';
+      const body = isLogin 
+        ? { username, password }
+        : { username, password, displayName: displayName || username };
+
+      const res = await fetch(`${API}${endpoint}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+
+      const data = await res.json();
+
+      if (!res.ok) {
+        throw new Error(data.error || 'Authentication failed');
+      }
+
+      localStorage.setItem('am_token', data.token);
+      localStorage.setItem('am_user', JSON.stringify(data.user));
+      onAuth(data.token, data.user);
+      toast.success(isLogin ? 'Welcome back!' : 'Account created successfully!');
+    } catch (err: any) {
+      toast.error(err.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="min-h-screen flex items-center justify-center grid-pattern p-4">
+      <Card className="w-full max-w-md bg-dark-card border-dark-border animate-fadeIn">
+        <CardHeader className="text-center">
+          <div className="w-16 h-16 bg-dark-accent/20 rounded-xl flex items-center justify-center mx-auto mb-4">
+            <CalendarIcon className="w-8 h-8 text-dark-accent" />
+          </div>
+          <CardTitle className="text-2xl font-mono text-white">
+            {isLogin ? 'Welcome Back' : 'Create Account'}
+          </CardTitle>
+          <CardDescription className="text-slate-400">
+            {isLogin ? 'Sign in to manage your availability' : 'Get started with your availability manager'}
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <form onSubmit={handleSubmit} className="space-y-4">
+            <div className="space-y-2">
+              <Label htmlFor="username" className="text-slate-300 font-mono text-sm">Username</Label>
+              <Input
+                id="username"
+                value={username}
+                onChange={(e) => setUsername(e.target.value)}
+                placeholder="Enter username"
+                className="bg-dark-bg border-dark-border text-white placeholder:text-slate-600"
+                required
+              />
+            </div>
+            {!isLogin && (
+              <div className="space-y-2">
+                <Label htmlFor="displayName" className="text-slate-300 font-mono text-sm">Display Name (optional)</Label>
+                <Input
+                  id="displayName"
+                  value={displayName}
+                  onChange={(e) => setDisplayName(e.target.value)}
+                  placeholder="How should we call you?"
+                  className="bg-dark-bg border-dark-border text-white placeholder:text-slate-600"
+                />
+              </div>
+            )}
+            <div className="space-y-2">
+              <Label htmlFor="password" className="text-slate-300 font-mono text-sm">Password</Label>
+              <Input
+                id="password"
+                type="password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                placeholder="Enter password"
+                className="bg-dark-bg border-dark-border text-white placeholder:text-slate-600"
+                required
+              />
+            </div>
+            <Button
+              type="submit"
+              className="w-full bg-dark-accent hover:bg-blue-600 text-white font-mono"
+              disabled={loading}
+            >
+              {loading ? 'Please wait...' : isLogin ? 'Sign In' : 'Create Account'}
+            </Button>
+          </form>
+          <p className="text-center mt-4 text-slate-400 text-sm">
+            {isLogin ? "Don't have an account?" : 'Already have an account?'}{' '}
+            <button
+              onClick={() => setIsLogin(!isLogin)}
+              className="text-dark-accent hover:underline font-mono"
+            >
+              {isLogin ? 'Sign up' : 'Sign in'}
+            </button>
+          </p>
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+
+// ==================== NOTIFICATION BELL ====================
+function NotificationBell({ 
+  userId, 
+  token 
+}: { 
+  userId: string; 
+  token: string;
+}) {
+  const [notifications, setNotifications] = useState<Notification[]>([]);
+  const [open, setOpen] = useState(false);
+
+  const fetchNotifications = useCallback(async () => {
+    try {
+      const res = await fetch(`${API}/api/notifications/${userId}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setNotifications(data);
+      }
+    } catch (err) {
+      console.error('Failed to fetch notifications:', err);
+    }
+  }, [userId, token]);
+
+  useEffect(() => {
+    fetchNotifications();
+    const interval = setInterval(fetchNotifications, 30000);
+    return () => clearInterval(interval);
+  }, [fetchNotifications]);
+
+  const unreadCount = notifications.filter(n => !n.read).length;
+
+  const markAsRead = async (id: string) => {
+    try {
+      const res = await fetch(`${API}/api/notifications/${id}/read`, {
+        method: 'PATCH',
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (res.ok) {
+        setNotifications(prev => prev.map(n => n.id === id ? { ...n, read: true } : n));
+      }
+    } catch (err) {
+      console.error('Failed to mark as read:', err);
+    }
+  };
+
+  const markAllAsRead = async () => {
+    try {
+      const res = await fetch(`${API}/api/notifications/read-all/${userId}`, {
+        method: 'PATCH',
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (res.ok) {
+        setNotifications(prev => prev.map(n => ({ ...n, read: true })));
+      }
+    } catch (err) {
+      console.error('Failed to mark all as read:', err);
+    }
+  };
+
+  return (
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>
+        <Button variant="ghost" size="icon" className="relative">
+          <Bell className="w-5 h-5 text-slate-300" />
+          {unreadCount > 0 && (
+            <span className="absolute -top-1 -right-1 w-5 h-5 bg-red-500 text-white text-xs rounded-full flex items-center justify-center font-mono">
+              {unreadCount}
+            </span>
+          )}
+        </Button>
+      </PopoverTrigger>
+      <PopoverContent className="w-80 p-0 bg-dark-card border-dark-border" align="end">
+        <div className="flex items-center justify-between p-3 border-b border-dark-border">
+          <h4 className="font-mono text-sm text-white">Notifications</h4>
+          {unreadCount > 0 && (
+            <Button variant="ghost" size="sm" onClick={markAllAsRead} className="text-xs text-dark-accent">
+              Mark all read
+            </Button>
+          )}
+        </div>
+        <ScrollArea className="h-64">
+          {notifications.length === 0 ? (
+            <div className="p-4 text-center text-slate-500 text-sm">
+              No notifications
+            </div>
+          ) : (
+            notifications.map((notification) => (
+              <div
+                key={notification.id}
+                className={`p-3 border-b border-dark-border cursor-pointer hover:bg-dark-bg/50 transition-colors ${
+                  notification.type === 'urgent' ? 'border-l-4 border-l-red-500' : 'border-l-4 border-l-blue-500'
+                } ${!notification.read ? 'bg-dark-bg/30' : ''}`}
+                onClick={() => markAsRead(notification.id)}
+              >
+                <p className="text-sm text-slate-200">{notification.message}</p>
+                <p className="text-xs text-slate-500 mt-1">
+                  {format(new Date(notification.createdAt), 'MMM d, h:mm a')}
+                </p>
+              </div>
+            ))
+          )}
+        </ScrollArea>
+      </PopoverContent>
+    </Popover>
+  );
+}
+
+// ==================== CALENDAR TAB ====================
+function CalendarTab({ 
+  userId, 
+  token 
+}: { 
+  userId: string; 
+  token: string;
+}) {
+  const [events, setEvents] = useState<CalendarEvent[]>([]);
+  const [view, setView] = useState<View>('month');
+  const [date, setDate] = useState(new Date());
+  const [showCreateDialog, setShowCreateDialog] = useState(false);
+  const [selectedSlot, setSelectedSlot] = useState<{ start: Date; end: Date } | null>(null);
+  const [eventTitle, setEventTitle] = useState('');
+  const [eventType, setEventType] = useState<EventType>('busy');
+  const [isPublic, setIsPublic] = useState(true);
+
+  const fetchEvents = useCallback(async () => {
+    try {
+      const res = await fetch(`${API}/api/calendar/${userId}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setEvents(data);
+      }
+    } catch (err) {
+      console.error('Failed to fetch events:', err);
+    }
+  }, [userId, token]);
+
+  useEffect(() => {
+    fetchEvents();
+  }, [fetchEvents]);
+
+  const handleSelectSlot = ({ start, end }: { start: Date; end: Date }) => {
+    setSelectedSlot({ start, end });
+    setShowCreateDialog(true);
+  };
+
+  const handleCreateEvent = async () => {
+    if (!selectedSlot || !eventTitle.trim()) return;
+
+    try {
+      const res = await fetch(`${API}/api/events`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          title: eventTitle,
+          start: selectedSlot.start.toISOString(),
+          end: selectedSlot.end.toISOString(),
+          type: eventType,
+          isPublic,
+        }),
+      });
+
+      if (res.ok) {
+        toast.success('Event created');
+        setShowCreateDialog(false);
+        setEventTitle('');
+        setEventType('busy');
+        setIsPublic(true);
+        fetchEvents();
+      }
+    } catch (err) {
+      toast.error('Failed to create event');
+    }
+  };
+
+  const handleDeleteEvent = async (eventId: string) => {
+    try {
+      const res = await fetch(`${API}/api/events/${eventId}`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${token}` },
+      });
+
+      if (res.ok) {
+        toast.success('Event deleted');
+        fetchEvents();
+      }
+    } catch (err) {
+      toast.error('Failed to delete event');
+    }
+  };
+
+  const calendarEvents = useMemo(() => {
+    return events.map(e => ({
+      id: e.id,
+      title: e.title,
+      start: new Date(e.start),
+      end: new Date(e.end),
+      resource: e,
+    }));
+  }, [events]);
+
+  const eventStyleGetter = (event: any) => {
+    const evt = event.resource as CalendarEvent;
+    return {
+      style: {
+        backgroundColor: evt.color,
+        borderRadius: '4px',
+        opacity: 0.9,
+        color: 'white',
+        border: 'none',
+        boxShadow: '0 2px 4px rgba(0,0,0,0.2)',
+      },
+    };
+  };
+
+  return (
+    <div className="space-y-4 animate-fadeIn">
+      <div className="flex items-center justify-between">
+        <h2 className="text-xl font-mono text-white">My Calendar</h2>
+        <div className="flex items-center gap-2">
+          {Object.entries(eventTypeLabels).map(([type, label]) => (
+            <div key={type} className="flex items-center gap-1 text-xs text-slate-400">
+              <div 
+                className="w-3 h-3 rounded" 
+                style={{ backgroundColor: eventColors[type as EventType] }}
+              />
+              <span>{label}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <div className="bg-dark-card border border-dark-border rounded-lg overflow-hidden">
+        <Calendar
+          localizer={localizer}
+          events={calendarEvents}
+          startAccessor="start"
+          endAccessor="end"
+          view={view}
+          onView={setView}
+          date={date}
+          onNavigate={setDate}
+          selectable
+          onSelectSlot={handleSelectSlot}
+          onSelectEvent={(event: any) => {
+            if (confirm(`Delete "${event.title}"?`)) {
+              handleDeleteEvent(event.id);
+            }
+          }}
+          eventPropGetter={eventStyleGetter}
+          style={{ height: 600 }}
+        />
+      </div>
+
+      <Dialog open={showCreateDialog} onOpenChange={setShowCreateDialog}>
+        <DialogContent className="bg-dark-card border-dark-border">
+          <DialogHeader>
+            <DialogTitle className="font-mono text-white">Create Event</DialogTitle>
+            <DialogDescription className="text-slate-400">
+              {selectedSlot && (
+                `${format(selectedSlot.start, 'MMM d, h:mm a')} - ${format(selectedSlot.end, 'h:mm a')}`
+              )}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 py-4">
+            <div className="space-y-2">
+              <Label className="text-slate-300 font-mono">Title</Label>
+              <Input
+                value={eventTitle}
+                onChange={(e) => setEventTitle(e.target.value)}
+                placeholder="Event title"
+                className="bg-dark-bg border-dark-border text-white"
+              />
+            </div>
+            <div className="space-y-2">
+              <Label className="text-slate-300 font-mono">Type</Label>
+              <Select value={eventType} onValueChange={(v) => setEventType(v as EventType)}>
+                <SelectTrigger className="bg-dark-bg border-dark-border text-white">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent className="bg-dark-card border-dark-border">
+                  {Object.entries(eventTypeLabels).map(([type, label]) => (
+                    <SelectItem key={type} value={type}>
+                      <div className="flex items-center gap-2">
+                        <div 
+                          className="w-3 h-3 rounded" 
+                          style={{ backgroundColor: eventColors[type as EventType] }}
+                        />
+                        {label}
+                      </div>
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="flex items-center justify-between">
+              <Label className="text-slate-300 font-mono">Public</Label>
+              <Switch checked={isPublic} onCheckedChange={setIsPublic} />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="ghost" onClick={() => setShowCreateDialog(false)}>
+              Cancel
+            </Button>
+            <Button 
+              onClick={handleCreateEvent}
+              className="bg-dark-accent hover:bg-blue-600"
+              disabled={!eventTitle.trim()}
+            >
+              Create
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </div>
+  );
+}
+
+// ==================== TASKS TAB ====================
+function TasksTab({ 
+  userId, 
+  token 
+}: { 
+  userId: string; 
+  token: string;
+}) {
+  const [tasks, setTasks] = useState<Task[]>([]);
+
+  const fetchTasks = useCallback(async () => {
+    try {
+      const res = await fetch(`${API}/api/tasks/${userId}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setTasks(data);
+      }
+    } catch (err) {
+      console.error('Failed to fetch tasks:', err);
+    }
+  }, [userId, token]);
+
+  useEffect(() => {
+    fetchTasks();
+  }, [fetchTasks]);
+
+  const toggleTask = async (taskId: string, completed: boolean) => {
+    try {
+      const res = await fetch(`${API}/api/tasks/${taskId}`, {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ completed }),
+      });
+
+      if (res.ok) {
+        fetchTasks();
+      }
+    } catch (err) {
+      toast.error('Failed to update task');
+    }
+  };
+
+  const groupedTasks = useMemo(() => {
+    const urgent = tasks.filter(t => t.urgent && !t.completed);
+    const pending = tasks.filter(t => !t.urgent && !t.completed);
+    const completed = tasks.filter(t => t.completed);
+    return { urgent, pending, completed };
+  }, [tasks]);
+
+  const TaskCard = ({ task }: { task: Task }) => (
+    <Card className="bg-dark-bg border-dark-border">
+      <CardContent className="p-4">
+        <div className="flex items-start justify-between gap-4">
+          <div className="flex-1">
+            <div className="flex items-center gap-2 mb-2">
+              <h4 className={`font-medium text-white ${task.completed ? 'line-through opacity-50' : ''}`}>
+                {task.title}
+              </h4>
+              <Badge 
+                style={{ 
+                  backgroundColor: priorityConfig[task.priority].color + '20',
+                  color: priorityConfig[task.priority].color,
+                  borderColor: priorityConfig[task.priority].color + '40',
+                }}
+                variant="outline"
+                className="text-xs font-mono"
+              >
+                {priorityConfig[task.priority].label}
+              </Badge>
+              {task.urgent && (
+                <Badge variant="outline" className="text-xs font-mono text-red-400 border-red-400/40 bg-red-400/10">
+                  Urgent
+                </Badge>
+              )}
+            </div>
+            {task.description && (
+              <p className="text-sm text-slate-400 mb-2">{task.description}</p>
+            )}
+            <div className="flex items-center gap-4 text-xs text-slate-500">
+              <span className="flex items-center gap-1">
+                <User className="w-3 h-3" />
+                From: {task.assignerName}
+              </span>
+              {task.dueDate && (
+                <span className="flex items-center gap-1">
+                  <Clock className="w-3 h-3" />
+                  Due: {format(new Date(task.dueDate), 'MMM d')}
+                </span>
+              )}
+            </div>
+          </div>
+          <Button
+            variant={task.completed ? "default" : "outline"}
+            size="sm"
+            onClick={() => toggleTask(task.id, !task.completed)}
+            className={task.completed ? 'bg-green-600 hover:bg-green-700' : 'border-dark-border'}
+          >
+            <Check className="w-4 h-4" />
+          </Button>
+        </div>
+      </CardContent>
+    </Card>
+  );
+
+  return (
+    <div className="space-y-6 animate-fadeIn">
+      <h2 className="text-xl font-mono text-white">My Tasks</h2>
+
+      {groupedTasks.urgent.length > 0 && (
+        <div className="space-y-3">
+          <h3 className="text-sm font-mono text-red-400 flex items-center gap-2">
+            <AlertCircle className="w-4 h-4" />
+            Urgent ({groupedTasks.urgent.length})
+          </h3>
+          <div className="space-y-2">
+            {groupedTasks.urgent.map(task => <TaskCard key={task.id} task={task} />)}
+          </div>
+        </div>
+      )}
+
+      {groupedTasks.pending.length > 0 && (
+        <div className="space-y-3">
+          <h3 className="text-sm font-mono text-amber-400 flex items-center gap-2">
+            <Clock className="w-4 h-4" />
+            Pending ({groupedTasks.pending.length})
+          </h3>
+          <div className="space-y-2">
+            {groupedTasks.pending.map(task => <TaskCard key={task.id} task={task} />)}
+          </div>
+        </div>
+      )}
+
+      {groupedTasks.completed.length > 0 && (
+        <div className="space-y-3">
+          <h3 className="text-sm font-mono text-green-400 flex items-center gap-2">
+            <Check className="w-4 h-4" />
+            Completed ({groupedTasks.completed.length})
+          </h3>
+          <div className="space-y-2">
+            {groupedTasks.completed.map(task => <TaskCard key={task.id} task={task} />)}
+          </div>
+        </div>
+      )}
+
+      {tasks.length === 0 && (
+        <div className="text-center py-12 text-slate-500">
+          <CheckSquare className="w-12 h-12 mx-auto mb-4 opacity-50" />
+          <p>No tasks yet</p>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ==================== SETTINGS TAB ====================
+function SettingsTab({ user }: { user: User }) {
+  const [copied, setCopied] = useState(false);
+
+  const shareableLink = `${window.location.origin}?user=${user.username}`;
+
+  const copyLink = () => {
+    navigator.clipboard.writeText(shareableLink);
+    setCopied(true);
+    toast.success('Link copied to clipboard');
+    setTimeout(() => setCopied(false), 2000);
+  };
+
+  return (
+    <div className="space-y-6 animate-fadeIn">
+      <h2 className="text-xl font-mono text-white">Settings</h2>
+
+      <Card className="bg-dark-card border-dark-border">
+        <CardHeader>
+          <CardTitle className="font-mono text-white">Profile</CardTitle>
+          <CardDescription className="text-slate-400">
+            Your public profile information
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="flex items-center gap-4">
+            <div className="w-16 h-16 rounded-full bg-dark-accent/20 flex items-center justify-center">
+              <User className="w-8 h-8 text-dark-accent" />
+            </div>
+            <div>
+              <h3 className="text-white font-medium">{user.displayName}</h3>
+              <p className="text-slate-400 text-sm">@{user.username}</p>
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card className="bg-dark-card border-dark-border">
+        <CardHeader>
+          <CardTitle className="font-mono text-white">Share Your Calendar</CardTitle>
+          <CardDescription className="text-slate-400">
+            Share this link so others can view your availability and assign tasks
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <div className="flex gap-2">
+            <Input
+              value={shareableLink}
+              readOnly
+              className="bg-dark-bg border-dark-border text-white flex-1"
+            />
+            <Button onClick={copyLink} className="bg-dark-accent hover:bg-blue-600">
+              {copied ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+
+// ==================== PUBLIC VIEW ====================
+function PublicView({ username }: { username: string }) {
+  const [profile, setProfile] = useState<any>(null);
+  const [loading, setLoading] = useState(true);
+  const [taskForm, setTaskForm] = useState({
+    title: '',
+    description: '',
+    dueDate: '',
+    priority: 'medium' as TaskPriority,
+    assignerName: '',
+    urgent: false,
+  });
+  const [submitting, setSubmitting] = useState(false);
+
+  useEffect(() => {
+    fetchProfile();
+  }, [username]);
+
+  const fetchProfile = async () => {
+    try {
+      const res = await fetch(`${API}/api/public/${username}`);
+      if (res.ok) {
+        const data = await res.json();
+        setProfile(data);
+      }
+    } catch (err) {
+      console.error('Failed to fetch profile:', err);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!taskForm.title.trim()) return;
+
+    setSubmitting(true);
+    try {
+      const res = await fetch(`${API}/api/tasks/assign`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          userId: profile.id,
+          ...taskForm,
+        }),
+      });
+
+      if (res.ok) {
+        toast.success('Task assigned successfully!');
+        setTaskForm({
+          title: '',
+          description: '',
+          dueDate: '',
+          priority: 'medium',
+          assignerName: '',
+          urgent: false,
+        });
+      } else {
+        throw new Error('Failed to assign task');
+      }
+    } catch (err) {
+      toast.error('Failed to assign task');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  if (loading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center grid-pattern">
+        <div className="text-slate-400">Loading...</div>
+      </div>
+    );
+  }
+
+  if (!profile) {
+    return (
+      <div className="min-h-screen flex items-center justify-center grid-pattern">
+        <Card className="bg-dark-card border-dark-border">
+          <CardContent className="p-8 text-center">
+            <User className="w-12 h-12 mx-auto mb-4 text-slate-500" />
+            <h2 className="text-xl font-mono text-white mb-2">User Not Found</h2>
+            <p className="text-slate-400">The user @{username} does not exist.</p>
+          </CardContent>
+        </Card>
+      </div>
+    );
+  }
+
+  const status = statusConfig[profile.status] || statusConfig.available;
+
+  return (
+    <div className="min-h-screen grid-pattern py-8 px-4">
+      <div className="max-w-2xl mx-auto space-y-6">
+        {/* Profile Header */}
+        <Card className="bg-dark-card border-dark-border animate-fadeIn">
+          <CardContent className="p-6">
+            <div className="flex items-center gap-4">
+              <div className="w-20 h-20 rounded-full bg-dark-accent/20 flex items-center justify-center">
+                <User className="w-10 h-10 text-dark-accent" />
+              </div>
+              <div>
+                <h1 className="text-2xl font-mono text-white">{profile.displayName}</h1>
+                <p className="text-slate-400">@{profile.username}</p>
+                <div className="flex items-center gap-2 mt-2">
+                  <div 
+                    className="w-3 h-3 rounded-full" 
+                    style={{ backgroundColor: status.color }}
+                  />
+                  <span className="text-sm" style={{ color: status.color }}>
+                    {status.label}
+                  </span>
+                </div>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+
+        {/* Upcoming Events */}
+        <Card className="bg-dark-card border-dark-border animate-slideIn">
+          <CardHeader>
+            <CardTitle className="font-mono text-white flex items-center gap-2">
+              <CalendarIcon className="w-5 h-5" />
+              Upcoming Availability
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            {profile.upcomingEvents.length === 0 ? (
+              <p className="text-slate-500 text-center py-4">No upcoming events</p>
+            ) : (
+              <div className="space-y-3">
+                {profile.upcomingEvents.map((event: CalendarEvent) => (
+                  <div 
+                    key={event.id} 
+                    className="flex items-center gap-3 p-3 bg-dark-bg rounded-lg"
+                  >
+                    <div 
+                      className="w-3 h-3 rounded-full flex-shrink-0"
+                      style={{ backgroundColor: event.color }}
+                    />
+                    <div className="flex-1">
+                      <p className="text-white text-sm">{event.title}</p>
+                      <p className="text-slate-500 text-xs">
+                        {format(new Date(event.start), 'MMM d, h:mm a')} - {format(new Date(event.end), 'h:mm a')}
+                      </p>
+                    </div>
+                    <Badge 
+                      variant="outline" 
+                      className="text-xs capitalize"
+                      style={{ 
+                        borderColor: event.color + '40',
+                        color: event.color,
+                      }}
+                    >
+                      {event.type}
+                    </Badge>
+                  </div>
+                ))}
+              </div>
+            )}
+          </CardContent>
+        </Card>
+
+        {/* Task Assignment Form */}
+        <Card className="bg-dark-card border-dark-border animate-slideIn">
+          <CardHeader>
+            <CardTitle className="font-mono text-white flex items-center gap-2">
+              <Send className="w-5 h-5" />
+              Assign a Task
+            </CardTitle>
+            <CardDescription className="text-slate-400">
+              Assign a task to {profile.displayName}
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <form onSubmit={handleSubmit} className="space-y-4">
+              <div className="space-y-2">
+                <Label className="text-slate-300 font-mono">Task Title *</Label>
+                <Input
+                  value={taskForm.title}
+                  onChange={(e) => setTaskForm({ ...taskForm, title: e.target.value })}
+                  placeholder="What needs to be done?"
+                  className="bg-dark-bg border-dark-border text-white"
+                  required
+                />
+              </div>
+              <div className="space-y-2">
+                <Label className="text-slate-300 font-mono">Description</Label>
+                <Textarea
+                  value={taskForm.description}
+                  onChange={(e) => setTaskForm({ ...taskForm, description: e.target.value })}
+                  placeholder="Add more details..."
+                  className="bg-dark-bg border-dark-border text-white min-h-[80px]"
+                />
+              </div>
+              <div className="grid grid-cols-2 gap-4">
+                <div className="space-y-2">
+                  <Label className="text-slate-300 font-mono">Due Date</Label>
+                  <Input
+                    type="date"
+                    value={taskForm.dueDate}
+                    onChange={(e) => setTaskForm({ ...taskForm, dueDate: e.target.value })}
+                    className="bg-dark-bg border-dark-border text-white"
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label className="text-slate-300 font-mono">Priority</Label>
+                  <Select 
+                    value={taskForm.priority} 
+                    onValueChange={(v) => setTaskForm({ ...taskForm, priority: v as TaskPriority })}
+                  >
+                    <SelectTrigger className="bg-dark-bg border-dark-border text-white">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent className="bg-dark-card border-dark-border">
+                      <SelectItem value="low">Low</SelectItem>
+                      <SelectItem value="medium">Medium</SelectItem>
+                      <SelectItem value="high">High</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+              </div>
+              <div className="space-y-2">
+                <Label className="text-slate-300 font-mono">Your Name</Label>
+                <Input
+                  value={taskForm.assignerName}
+                  onChange={(e) => setTaskForm({ ...taskForm, assignerName: e.target.value })}
+                  placeholder="Who is assigning this task?"
+                  className="bg-dark-bg border-dark-border text-white"
+                />
+              </div>
+              <div className="flex items-center gap-2">
+                <Switch
+                  checked={taskForm.urgent}
+                  onCheckedChange={(v) => setTaskForm({ ...taskForm, urgent: v })}
+                />
+                <Label className="text-slate-300 font-mono text-sm">Mark as urgent</Label>
+              </div>
+              <Button
+                type="submit"
+                className="w-full bg-dark-accent hover:bg-blue-600"
+                disabled={submitting || !taskForm.title.trim()}
+              >
+                {submitting ? 'Assigning...' : 'Assign Task'}
+              </Button>
+            </form>
+          </CardContent>
+        </Card>
+      </div>
+    </div>
+  );
+}
+
+// ==================== MAIN APP ====================
+function App() {
+  const [token, setToken] = useState<string | null>(null);
+  const [user, setUser] = useState<User | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [socket, setSocket] = useState<Socket | null>(null);
+
+  // Check for public view
+  const urlParams = new URLSearchParams(window.location.search);
+  const publicUsername = urlParams.get('user');
+
+  // Check for existing auth
+  useEffect(() => {
+    const storedToken = localStorage.getItem('am_token');
+    const storedUser = localStorage.getItem('am_user');
+
+    if (storedToken && storedUser) {
+      setToken(storedToken);
+      setUser(JSON.parse(storedUser));
+    }
+    setLoading(false);
+  }, []);
+
+  // Setup Socket.io
+  useEffect(() => {
+    if (token && user) {
+      const newSocket = io(API || window.location.origin);
+      newSocket.emit('register', user.id);
+      
+      newSocket.on('new-notification', (notification: Notification) => {
+        toast.info(notification.message);
+      });
+
+      newSocket.on('new-task', (task: Task) => {
+        toast.success(`New task: ${task.title}`);
+      });
+
+      newSocket.on('urgent-notification', ({ fromName, message }: { fromName: string; message: string }) => {
+        toast.error(`Urgent from ${fromName}: ${message}`);
+      });
+
+      setSocket(newSocket);
+
+      return () => {
+        newSocket.close();
+      };
+    }
+  }, [token, user]);
+
+  const handleAuth = (newToken: string, newUser: User) => {
+    setToken(newToken);
+    setUser(newUser);
+  };
+
+  const handleLogout = () => {
+    localStorage.removeItem('am_token');
+    localStorage.removeItem('am_user');
+    setToken(null);
+    setUser(null);
+    socket?.close();
+  };
+
+  if (loading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-dark-bg">
+        <div className="text-slate-400">Loading...</div>
+      </div>
+    );
+  }
+
+  // Public view
+  if (publicUsername) {
+    return <PublicView username={publicUsername} />;
+  }
+
+  // Auth screen
+  if (!token || !user) {
+    return <AuthScreen onAuth={handleAuth} />;
+  }
+
+  // Main app
+  return (
+    <div className="min-h-screen bg-dark-bg grid-pattern">
+      {/* Header */}
+      <header className="border-b border-dark-border bg-dark-bg/80 backdrop-blur-sm sticky top-0 z-50">
+        <div className="max-w-6xl mx-auto px-4 py-3 flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 bg-dark-accent/20 rounded-lg flex items-center justify-center">
+              <CalendarIcon className="w-5 h-5 text-dark-accent" />
+            </div>
+            <div>
+              <h1 className="font-mono text-white text-lg">Availability Manager</h1>
+              <p className="text-xs text-slate-400">@{user.username}</p>
+            </div>
+          </div>
+          <div className="flex items-center gap-2">
+            <NotificationBell userId={user.id} token={token} />
+            <Button variant="ghost" size="icon" onClick={handleLogout}>
+              <LogOut className="w-5 h-5 text-slate-400" />
+            </Button>
+          </div>
+        </div>
+      </header>
+
+      {/* Main Content */}
+      <main className="max-w-6xl mx-auto px-4 py-6">
+        <Tabs defaultValue="calendar" className="space-y-6">
+          <TabsList className="bg-dark-card border border-dark-border">
+            <TabsTrigger value="calendar" className="data-[state=active]:bg-dark-accent data-[state=active]:text-white">
+              <CalendarIcon className="w-4 h-4 mr-2" />
+              Calendar
+            </TabsTrigger>
+            <TabsTrigger value="tasks" className="data-[state=active]:bg-dark-accent data-[state=active]:text-white">
+              <CheckSquare className="w-4 h-4 mr-2" />
+              Tasks
+            </TabsTrigger>
+            <TabsTrigger value="settings" className="data-[state=active]:bg-dark-accent data-[state=active]:text-white">
+              <Settings className="w-4 h-4 mr-2" />
+              Settings
+            </TabsTrigger>
+          </TabsList>
+
+          <TabsContent value="calendar">
+            <CalendarTab userId={user.id} token={token} />
+          </TabsContent>
+
+          <TabsContent value="tasks">
+            <TasksTab userId={user.id} token={token} />
+          </TabsContent>
+
+          <TabsContent value="settings">
+            <SettingsTab user={user} />
+          </TabsContent>
+        </Tabs>
+      </main>
+    </div>
+  );
+}
+
+export default App;
